@@ -1,4 +1,4 @@
 {
   "latest": "1.0.2",
-  "bin_url": "https://raw.githubusercontent.com/GlueBeee/esp32-ota/main/firmware/beta.ino.bin"
+  "bin_url": "https://raw.githubusercontent.com/GlueBeee/esp32-ota/main/beta.ino.bin"
 }
