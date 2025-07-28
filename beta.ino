@@ -12,17 +12,27 @@
 
 const char* ssid = "jangganggu";
 const char* password = "5qarjbnd";
+const char* serverEndpoint = "http://dataalamdiy.com/update?key=phMonitoringEks";
 const char* versionInfoUrl = "https://raw.githubusercontent.com/GlueBeee/esp32-ota/main/version.json";
 
+// Global
 Preferences prefs;
 String currentVersion;
 bool updatedThisBoot = false;
 
+String serialBuffer = "";
+float radonValue = 0.0;
+float depthValue = 0.0;
+
 unsigned long lastBlink = 0;
-bool ledState = false;
+unsigned long lastSend = 0;
 unsigned long lastOTA = 0;
-const unsigned long otaInterval = 60000;  // 1 menit untuk debug
+
+const unsigned long blinkInterval = 1000;
+const unsigned long sendInterval = 60000;
+const unsigned long otaInterval = 3600000;
 const int maxOTARetry = 3;
+bool ledState = false;
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
@@ -55,21 +65,24 @@ void setup() {
 }
 
 void loop() {
-  // Heartbeat log
-  if (millis() - lastBlink > 1000) {
+  if (millis() - lastBlink > blinkInterval) {
     ledState = !ledState;
     digitalWrite(LED_PIN, ledState);
     lastBlink = millis();
     Serial.println("🔄 Loop aktif...");
   }
 
-  // Cek OTA
+  if (millis() - lastSend > sendInterval) {
+    lastSend = millis();
+    bacaSerialDariESP1();
+    kirimDataKeServer(radonValue, depthValue);
+  }
+
   if (millis() - lastOTA > otaInterval) {
     lastOTA = millis();
     cekFirmwareTerbaru();
   }
 
-  // Reset flag update
   if (updatedThisBoot) {
     Serial.println("✅ Firmware telah diperbarui!");
     digitalWrite(LED_PIN, HIGH);
@@ -80,6 +93,52 @@ void loop() {
     prefs.end();
     updatedThisBoot = false;
   }
+}
+
+void bacaSerialDariESP1() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '$') {
+      serialBuffer += c;
+      if (parseSensorFrame(serialBuffer, radonValue, depthValue)) {
+        Serial.printf("✅ Radon: %.2f | Kedalaman: %.2f\n", radonValue, depthValue);
+      } else {
+        Serial.println("⚠️ Frame ditolak");
+      }
+      serialBuffer = "";
+    } else {
+      serialBuffer += c;
+    }
+  }
+}
+
+bool parseSensorFrame(const String& frame, float& radon, float& depth) {
+  if (!frame.startsWith("#") || !frame.endsWith("$")) return false;
+
+  int rIndex = frame.indexOf("R:");
+  int dIndex = frame.indexOf("D:");
+  int semiIndex = frame.indexOf(";", rIndex);
+
+  if (rIndex == -1 || dIndex == -1 || semiIndex == -1 || semiIndex > dIndex) return false;
+
+  String radonStr = frame.substring(rIndex + 2, semiIndex);
+  String depthStr = frame.substring(dIndex + 2, frame.length() - 1);
+
+  radon = radonStr.toFloat();
+  depth = depthStr.toFloat();
+
+  return (radon >= 0 && radon <= 1000 && depth >= 0 && depth <= 100);
+}
+
+void kirimDataKeServer(float radon, float depth) {
+  String url = String(serverEndpoint) + "&radon6=" + String(radon, 2) + "&levelair=" + String(depth, 2);
+
+  HTTPClient http;
+  http.begin(url);
+  int code = http.GET();
+  Serial.println("🌐 Kirim: " + url);
+  Serial.printf("📡 Response: %d\n", code);
+  http.end();
 }
 
 void cekFirmwareTerbaru() {
@@ -187,6 +246,30 @@ bool performOTA(String url, String newVersion) {
   }
 }
 
+void tampilkanLogUpdate() {
+  File logFile = SPIFFS.open("/update_log.txt", FILE_READ);
+  if (!logFile) {
+    Serial.println("📁 Tidak ada log update.");
+    return;
+  }
+
+  Serial.println("📜 Riwayat update:");
+  while (logFile.available()) {
+    Serial.write(logFile.read());
+  }
+  logFile.close();
+}
+
+void logOTAGagal(const String& versi, const String& alasan) {
+  File logFile = SPIFFS.open("/update_log.txt", FILE_APPEND);
+  if (logFile) {
+    logFile.printf("GAGAL Versi: %s | Alasan: %s | Waktu(ms): %lu\n", versi.c_str(), alasan.c_str(), millis());
+    logFile.close();
+  } else {
+    Serial.println("❌ Gagal membuka file log untuk OTA gagal.");
+  }
+}
+
 bool isNewerVersion(const String& newVer, const String& currentVer) {
   int newParts[3] = {0}, currParts[3] = {0};
   sscanf(newVer.c_str(), "%d.%d.%d", &newParts[0], &newParts[1], &newParts[2]);
@@ -197,29 +280,4 @@ bool isNewerVersion(const String& newVer, const String& currentVer) {
     if (newParts[i] < currParts[i]) return false;
   }
   return false;
-}
-
-void logOTAGagal(const String& versi, const String& alasan) {
-  File logFile = SPIFFS.open("/update_log.txt", FILE_APPEND);
-  if (logFile) {
-    logFile.printf("❌ OTA gagal versi: %s | Alasan: %s | Waktu(ms): %lu\n",
-                   versi.c_str(), alasan.c_str(), millis());
-    logFile.close();
-  } else {
-    Serial.println("⚠️ Gagal buka file log untuk OTA gagal.");
-  }
-}
-
-void tampilkanLogUpdate() {
-  File logFile = SPIFFS.open("/update_log.txt", FILE_READ);
-  if (!logFile) {
-    Serial.println("❌ Tidak ada log update.");
-    return;
-  }
-
-  Serial.println("📜 Riwayat update:");
-  while (logFile.available()) {
-    Serial.write(logFile.read());
-  }
-  logFile.close();
 }
