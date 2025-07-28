@@ -4,6 +4,7 @@
 #include <Update.h>
 #include <Preferences.h>
 #include <SPIFFS.h>
+#include <ArduinoJson.h>
 
 // Konfigurasi
 #define LED_PIN 2
@@ -11,28 +12,24 @@
 
 const char* ssid = "jangganggu";
 const char* password = "5qarjbnd";
-const char* serverEndpoint = "http://dataalamdiy.com/update?key=phMonitoringEks";  //https://dataalamdiy.com/update?key=phMonitoringEks&levelair=xx&radon6=xx
 const char* versionInfoUrl = "https://raw.githubusercontent.com/GlueBeee/esp32-ota/main/version.json";
 
-// Global
 Preferences prefs;
 String currentVersion;
 bool updatedThisBoot = false;
 
-String serialBuffer = "";
-float radonValue = 0.0;
-float depthValue = 0.0;
-
-unsigned long lastSend = 0;
+unsigned long lastBlink = 0;
+bool ledState = false;
 unsigned long lastOTA = 0;
-const unsigned long sendInterval = 60000;   // 1 menit
-const unsigned long otaInterval = 3600000;  // 1 jam
+const unsigned long otaInterval = 60000;  // 1 menit untuk debug
 const int maxOTARetry = 3;
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+
+  Serial.println("🚀 Memulai setup...");
 
   if (!SPIFFS.begin(true)) {
     Serial.println("❌ Gagal mount SPIFFS");
@@ -58,18 +55,21 @@ void setup() {
 }
 
 void loop() {
-  //bacaSerialDariESP1();
-
-  if (millis() - lastSend > sendInterval) {
-    lastSend = millis();
-    kirimDataKeServer(radonValue, depthValue);
+  // Heartbeat log
+  if (millis() - lastBlink > 1000) {
+    ledState = !ledState;
+    digitalWrite(LED_PIN, ledState);
+    lastBlink = millis();
+    Serial.println("🔄 Loop aktif...");
   }
 
+  // Cek OTA
   if (millis() - lastOTA > otaInterval) {
     lastOTA = millis();
     cekFirmwareTerbaru();
   }
 
+  // Reset flag update
   if (updatedThisBoot) {
     Serial.println("✅ Firmware telah diperbarui!");
     digitalWrite(LED_PIN, HIGH);
@@ -78,120 +78,62 @@ void loop() {
     prefs.begin("ota", false);
     prefs.putBool("updated", false);
     prefs.end();
+    updatedThisBoot = false;
   }
-}
-
-void bacaSerialDariESP1() {
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '$') {
-      serialBuffer += c;
-      if (parseSensorFrame(serialBuffer, radonValue, depthValue)) {
-        Serial.printf("✅ Radon: %.2f | Kedalaman: %.2f\n", radonValue, depthValue);
-      } else {
-        Serial.println("⚠️ Frame ditolak");
-      }
-      serialBuffer = "";
-    } else {
-      serialBuffer += c;
-    }
-  }
-}
-
-bool parseSensorFrame(const String& frame, float& radon, float& depth) {
-  if (!frame.startsWith("#") || !frame.endsWith("$")) {
-    Serial.println("❌ Format frame tidak valid");
-    return false;
-  }
-
-  int rIndex = frame.indexOf("R:");
-  int dIndex = frame.indexOf("D:");
-
-  if (rIndex == -1 || dIndex == -1) {
-    Serial.println("❌ Field R: atau D: tidak ditemukan");
-    return false;
-  }
-
-  int semiIndex = frame.indexOf(";", rIndex);
-  if (semiIndex == -1 || semiIndex > dIndex) {
-    Serial.println("❌ Format pemisah tidak sesuai");
-    return false;
-  }
-
-  String radonStr = frame.substring(rIndex + 2, semiIndex);
-  String depthStr = frame.substring(dIndex + 2, frame.length() - 1);  // exclude $
-
-  radon = radonStr.toFloat();
-  depth = depthStr.toFloat();
-
-  if (radon < 0 || radon > 1000 || depth < 0 || depth > 100) {
-    Serial.println("❌ Nilai tidak logis");
-    return false;
-  }
-
-  return true;
-}
-
-void kirimDataKeServer(float radon, float depth) {
-  float radon6 = radon;
-  float levelair = depth;
-  String url = String(serverEndpoint) + "&levelair=" + String(radon6, 2) + "&depth=" + String(depth, 2);
-
-  HTTPClient http;
-  http.begin(url);
-  int code = http.GET();
-  Serial.println("🌐 Kirim: " + url);
-  Serial.printf("📡 Response: %d\n", code);
-  http.end();
 }
 
 void cekFirmwareTerbaru() {
   HTTPClient http;
+  Serial.println("🌐 Mengakses metadata firmware...");
   http.begin(versionInfoUrl);
   int httpCode = http.GET();
 
-  if (httpCode == 200) {
+  if (httpCode == HTTP_CODE_OK) {
     String payload = http.getString();
+    Serial.println("📦 Payload mentah:\n" + payload);
 
-    int idxFirmware = payload.indexOf("\"firmware\":\"");
-    int idxUrl = payload.indexOf("\"url\":\"");
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, payload);
 
-    if (idxFirmware != -1 && idxUrl != -1) {
-      int startVer = idxFirmware + 11;
-      int endVer = payload.indexOf("\"", startVer);
-      String versiBaru = payload.substring(startVer, endVer);
+    if (error) {
+      Serial.println("❌ Parsing JSON gagal:");
+      Serial.println(error.c_str());
+      return;
+    }
 
-      int startUrl = idxUrl + 7;
-      int endUrl = payload.indexOf("\"", startUrl);
-      String firmwareUrl = payload.substring(startUrl, endUrl);
+    String versiBaru = doc["firmware"];
+    String firmwareUrl = doc["url"];
 
+    if (versiBaru.length() > 0 && firmwareUrl.length() > 0) {
       Serial.println("🔍 Versi terbaru: " + versiBaru);
       Serial.println("🌐 URL firmware: " + firmwareUrl);
 
-      if (versiBaru != currentVersion) {
-        Serial.println("🚀 Memulai OTA...");
-        for (int i = 1; i <= maxOTARetry; i++) {
-          Serial.printf("🔄 OTA percobaan ke-%d...\n", i);
+      if (isNewerVersion(versiBaru, currentVersion)) {
+        Serial.println("📢 Versi baru tersedia! Memulai OTA...");
+        bool sukses = false;
+        for (int i = 0; i < maxOTARetry; i++) {
+          Serial.printf("🔁 OTA percobaan ke-%d...\n", i + 1);
           if (performOTA(firmwareUrl, versiBaru)) {
-            Serial.println("✅ OTA berhasil pada percobaan ke-" + String(i));
+            sukses = true;
             break;
-          } else {
-            Serial.println("⚠️ OTA gagal pada percobaan ke-" + String(i));
-            delay(5000);  // jeda sebelum retry
           }
+          delay(3000);
+        }
 
-          if (i == maxOTARetry) {
-            Serial.println("❌ OTA gagal setelah " + String(maxOTARetry) + " percobaan.");
-          }
+        if (!sukses) {
+          Serial.println("❌ Semua percobaan OTA gagal.");
+          logOTAGagal(versiBaru, "Semua percobaan gagal");
         }
       } else {
-        Serial.println("✅ Firmware sudah versi terbaru.");
+        Serial.println("✅ Firmware sudah versi terbaru. Tidak perlu OTA.");
       }
+
     } else {
-      Serial.println("⚠️ Format JSON tidak sesuai.");
+      Serial.println("⚠️ Versi atau URL kosong di JSON.");
     }
+
   } else {
-    Serial.println("❌ Gagal cek versi firmware. HTTP code: " + String(httpCode));
+    Serial.println("❌ Gagal akses metadata. HTTP code: " + String(httpCode));
   }
 
   http.end();
@@ -208,12 +150,14 @@ bool performOTA(String url, String newVersion) {
 
   if (httpCode != 200) {
     Serial.println("❌ Gagal akses firmware");
+    logOTAGagal(newVersion, "HTTP code " + String(httpCode));
     return false;
   }
 
   int contentLength = http.getSize();
   if (!Update.begin(contentLength)) {
     Serial.println("❌ Gagal memulai update");
+    logOTAGagal(newVersion, "Update.begin gagal");
     return false;
   }
 
@@ -238,7 +182,31 @@ bool performOTA(String url, String newVersion) {
     return true;
   } else {
     Serial.println("❌ Gagal flash firmware");
+    logOTAGagal(newVersion, "Update.writeStream gagal");
     return false;
+  }
+}
+
+bool isNewerVersion(const String& newVer, const String& currentVer) {
+  int newParts[3] = {0}, currParts[3] = {0};
+  sscanf(newVer.c_str(), "%d.%d.%d", &newParts[0], &newParts[1], &newParts[2]);
+  sscanf(currentVer.c_str(), "%d.%d.%d", &currParts[0], &currParts[1], &currParts[2]);
+
+  for (int i = 0; i < 3; i++) {
+    if (newParts[i] > currParts[i]) return true;
+    if (newParts[i] < currParts[i]) return false;
+  }
+  return false;
+}
+
+void logOTAGagal(const String& versi, const String& alasan) {
+  File logFile = SPIFFS.open("/update_log.txt", FILE_APPEND);
+  if (logFile) {
+    logFile.printf("❌ OTA gagal versi: %s | Alasan: %s | Waktu(ms): %lu\n",
+                   versi.c_str(), alasan.c_str(), millis());
+    logFile.close();
+  } else {
+    Serial.println("⚠️ Gagal buka file log untuk OTA gagal.");
   }
 }
 
