@@ -21,8 +21,8 @@ String currentVersion;
 bool updatedThisBoot = false;
 
 String serialBuffer = "";
-float radonValue = 0.0;
-float depthValue = 0.0;
+int radonValue = 0;
+int depthValue = 0;
 
 unsigned long lastBlink = 0;
 unsigned long lastSend = 0;
@@ -35,6 +35,8 @@ const int maxOTARetry = 3;
 bool ledState = false;
 
 void setup() {
+
+  Serial1.begin(9600, SERIAL_8N1, 16, 17);  // RX=16, TX=17 (bisa disesuaikan)
   Serial.begin(SERIAL_BAUD);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
@@ -46,7 +48,7 @@ void setup() {
   }
 
   prefs.begin("ota", false);
-  currentVersion = prefs.getString("version", "1.0.1");
+  currentVersion = prefs.getString("version", "1.0.6");
   updatedThisBoot = prefs.getBool("updated", false);
   prefs.end();
 
@@ -96,7 +98,7 @@ void loop() {
 }
 
 void bacaSerialDariESP1() {
-  while (Serial.available()) {
+  while (Serial1.available()) {
     char c = Serial.read();
     if (c == '$') {
       serialBuffer += c;
@@ -112,7 +114,7 @@ void bacaSerialDariESP1() {
   }
 }
 
-bool parseSensorFrame(const String& frame, float& radon, float& depth) {
+bool parseSensorFrame(const String& frame, int& radon, int& depth) {
   if (!frame.startsWith("#") || !frame.endsWith("$")) return false;
 
   int rIndex = frame.indexOf("R:");
@@ -124,13 +126,13 @@ bool parseSensorFrame(const String& frame, float& radon, float& depth) {
   String radonStr = frame.substring(rIndex + 2, semiIndex);
   String depthStr = frame.substring(dIndex + 2, frame.length() - 1);
 
-  radon = radonStr.toFloat();
-  depth = depthStr.toFloat();
+  radon = radonStr.toInt();
+  depth = depthStr.toInt();
 
   return (radon >= 0 && radon <= 1000 && depth >= 0 && depth <= 100);
 }
 
-void kirimDataKeServer(float radon, float depth) {
+void kirimDataKeServer(int radon, int depth) {
   String url = String(serverEndpoint) + "&radon6=" + String(radon, 2) + "&levelair=" + String(depth, 2);
 
   HTTPClient http;
@@ -271,7 +273,7 @@ void logOTAGagal(const String& versi, const String& alasan) {
 }
 
 bool isNewerVersion(const String& newVer, const String& currentVer) {
-  int newParts[3] = {0}, currParts[3] = {0};
+  int newParts[3] = { 0 }, currParts[3] = { 0 };
   sscanf(newVer.c_str(), "%d.%d.%d", &newParts[0], &newParts[1], &newParts[2]);
   sscanf(currentVer.c_str(), "%d.%d.%d", &currParts[0], &currParts[1], &currParts[2]);
 
